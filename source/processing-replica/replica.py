@@ -82,6 +82,7 @@ windows: dict[str, deque] = {}
 # Tracking counters for the overlapping window
 sample_counters: dict[str, int] = {}
 cooldown_counters: dict[str, int] = {}
+event_counters: dict[str, int] = {}
 
 # Sampling-rate cache          {sensor_id: float}
 sampling_rates: dict[str, float] = {}
@@ -107,6 +108,7 @@ async def health() -> dict:
         "broker_urls": BROKER_URLS,
         "gateway_url": GATEWAY_URL,
     }
+
 
 # ---------------------------------------------------------------------------
 # Database helpers
@@ -285,6 +287,7 @@ async def process_message(raw: str) -> None:
         windows[sensor_id] = deque(maxlen=WINDOW_SIZE)
         sample_counters[sensor_id] = 0
         cooldown_counters[sensor_id] = 0
+        event_counters[sensor_id] = 0
 
     # Append new data
     win = windows[sensor_id]
@@ -322,19 +325,21 @@ async def process_message(raw: str) -> None:
         return  # frequency below detectable bands
 
     # ---- Event detected! ---------------------------------------------------
-    duration = WINDOW_SIZE / sampling_rate  # seconds covered by the window
+    event_counters[sensor_id] += 1
+    event_id = f"{sensor_id}-{event_counters[sensor_id]}"
 
     event = {
+        "event_id": event_id,
         "sensor_id": sensor_id,
         "event_type": event_type,
         "last_sample_timestamp": timestamp,
         "peak_frequency": round(peak_freq, 4),
         "peak_amplitude": round(peak_amp, 6),
-        "duration": round(duration, 3),
     }
 
     log.info(
-        "EVENT DETECTED — sensor=%s type=%s freq=%.3f Hz amp=%.4f",
+        "EVENT DETECTED — event_id=%s sensor=%s type=%s freq=%.3f Hz amp=%.4f",
+        event_id,
         sensor_id,
         event_type,
         peak_freq,
