@@ -194,7 +194,9 @@ class Broker:
         sensor_ws_url = self._build_sensor_ws_url(sensor.websocket_url)
         websocket = None
         try:
-            logger.info("Connecting to sensor %s at %s", sensor.sensor_id, sensor_ws_url)
+            logger.info(
+                "Connecting to sensor %s at %s", sensor.sensor_id, sensor_ws_url
+            )
             websocket = await websockets.connect(sensor_ws_url)
 
             async for raw_message in websocket:
@@ -233,7 +235,10 @@ class Broker:
             return
 
         await asyncio.gather(
-            *(self._send_to_replica(replica, message) for replica in connected_replicas),
+            *(
+                self._send_to_replica(replica, message)
+                for replica in connected_replicas
+            ),
             return_exceptions=True,
         )
 
@@ -273,7 +278,9 @@ class Broker:
             self.next_replica_id += 1
             total_connected = len(self.replicas)
 
-        logger.info("Replica %s connected (total=%s)", replica.replica_id, total_connected)
+        logger.info(
+            "Replica %s connected (total=%s)", replica.replica_id, total_connected
+        )
 
         try:
             await websocket.wait_closed()
@@ -287,7 +294,11 @@ class Broker:
                 total_connected = len(self.replicas)
             with suppress(Exception):
                 await websocket.close()
-            logger.info("Replica %s disconnected (total=%s)", replica.replica_id, total_connected)
+            logger.info(
+                "Replica %s disconnected (total=%s)",
+                replica.replica_id,
+                total_connected,
+            )
 
     def _build_sensor_ws_url(self, websocket_path: str) -> str:
         base = urlsplit(self.config.simulator_base_url)
@@ -328,4 +339,6 @@ if __name__ == "__main__":
         # asyncio.run handles the event loop creation and teardown safely
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("KeyboardInterrupt received (Ctrl+C). Shutting down broker gracefully...")
+        logger.info(
+            "KeyboardInterrupt received (Ctrl+C). Shutting down broker gracefully..."
+        )

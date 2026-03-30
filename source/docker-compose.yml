@@ -165,5 +165,17 @@ services:
       gateway:
         condition: service_started
 
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: seismic-frontend
+    ports:
+      # Maps port 3000 on your local machine to port 80 in the Nginx container
+      - "3000:80"
+    depends_on:
+      gateway:
+        condition: service_started
+
 volumes:
   postgres-data:

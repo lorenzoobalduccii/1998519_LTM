@@ -33,13 +33,17 @@ logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 DEFAULT_REPLICA_PORTS = [8000, 8002, 8004, 8006, 8008, 8010]
 raw_replicas = os.getenv("REPLICA_URLS")
 if raw_replicas:
-    ALL_INITIAL_REPLICAS = [url.strip() for url in raw_replicas.split(",") if url.strip()]
+    ALL_INITIAL_REPLICAS = [
+        url.strip() for url in raw_replicas.split(",") if url.strip()
+    ]
 else:
     ALL_INITIAL_REPLICAS = [
         f"http://127.0.0.1:{port}" for port in DEFAULT_REPLICA_PORTS
     ]
 REPLICA_PORTS = [
-    parsed.port for parsed in (urlsplit(url) for url in ALL_INITIAL_REPLICAS) if parsed.port
+    parsed.port
+    for parsed in (urlsplit(url) for url in ALL_INITIAL_REPLICAS)
+    if parsed.port
 ]
 
 active_replicas = list(ALL_INITIAL_REPLICAS)
@@ -50,6 +54,7 @@ recent_events_cache = deque(maxlen=100)
 
 DB_DSN = os.getenv("DB_DSN", "postgresql://replica:replica@localhost:5432/seismic")
 db_pool: asyncpg.Pool | None = None
+
 
 # ==========================================
 # 3. WEBSOCKET CONNECTION MANAGER
@@ -78,7 +83,9 @@ class ConnectionManager:
                 # Silent handling of unclean disconnections
                 pass
 
+
 ws_manager = ConnectionManager()
+
 
 # ==========================================
 # 4. HEALTH CHECK TASK (Fault Tolerance [cite: 105, 106, 137])
@@ -96,16 +103,20 @@ async def ping_replicas_continuously():
             for replica_url in ALL_INITIAL_REPLICAS:
                 try:
                     response = await client.get(f"{replica_url}/health")
-                    if response.status_code != 200:
-                        raise httpx.ConnectError("Unhealthy status")
-                    healthy_replicas.append(replica_url)
-                except (httpx.ConnectError, httpx.ReadTimeout):
+                    if response.status_code == 200:
+                        healthy_replicas.append(replica_url)
+                    else:
+                        unreachable_replicas.append(replica_url)
+                except Exception as e:
+                    # Cattura qualsiasi errore di rete o connessione per prevenire il crash del task
+                    log.warning(f"Health check fallito per {replica_url}: {e}")
                     unreachable_replicas.append(replica_url)
 
             active_replicas = healthy_replicas
             dead_replicas = unreachable_replicas
 
             await asyncio.sleep(5)
+
 
 # ==========================================
 # 5. LIFESPAN & APP INIT
@@ -114,10 +125,10 @@ async def ping_replicas_continuously():
 async def lifespan(app: FastAPI):
     global db_pool
     log.info(f"Gateway starting with replicas: {ALL_INITIAL_REPLICAS}")
-    
+
     # 1. Start the Health Check task
     health_task = asyncio.create_task(ping_replicas_continuously())
-    
+
     # 2. Connect the Gateway to the Database (read-only)
     try:
         db_pool = await asyncpg.create_pool(dsn=DB_DSN, min_size=1, max_size=10)
@@ -126,12 +137,13 @@ async def lifespan(app: FastAPI):
         log.error(f"Failed to connect to DB: {e}")
 
     yield
-    
+
     # Shutdown sequence
     health_task.cancel()
     if db_pool:
         await db_pool.close()
     log.info("Gateway shutting down.")
+
 
 # Initialize FastAPI App (CRITICAL FIX - THIS WAS MISSING!)
 app = FastAPI(title="Seismic Intelligence Gateway", lifespan=lifespan)
@@ -148,6 +160,7 @@ app.add_middleware(
 # ==========================================
 # 6. API ROUTES
 # ==========================================
+
 
 @app.post("/api/events")
 async def receive_event(payload: dict):
@@ -183,11 +196,12 @@ async def receive_event(payload: dict):
         sensor_id,
         normalized_payload.get("peak_amplitude"),
     )
-    
+
     # Forward to Live Feed via WebSocket [cite: 110]
     await ws_manager.broadcast(normalized_payload)
-    
+
     return {"status": "dispatched", "event_id": event_id}
+
 
 @app.get("/api/system/status")
 async def get_system_status():
@@ -199,11 +213,12 @@ async def get_system_status():
         "nodes": {
             "total": len(ALL_INITIAL_REPLICAS),
             "online": len(active_replicas),
-            "offline": len(dead_replicas)
+            "offline": len(dead_replicas),
         },
         "active_list": active_replicas,
-        "dead_list": dead_replicas
+        "dead_list": dead_replicas,
     }
+
 
 # ==========================================
 # 7. WEBSOCKET ROUTE
@@ -218,6 +233,7 @@ async def websocket_live_feed(websocket: WebSocket):
     except WebSocketDisconnect:
         ws_manager.disconnect(websocket)
 
+
 # ==========================================
 # 8. HISTORY ROUTE
 # ==========================================
@@ -230,7 +246,7 @@ async def get_historical_events(
     event_type: Optional[str] = None,
     min_freq: Optional[float] = None,
     max_freq: Optional[float] = None,
-    limit: int = 100
+    limit: int = 100,
 ):
     """
     Retrieves the history of seismic events with advanced filters.
@@ -249,38 +265,38 @@ async def get_historical_events(
         JOIN sensors s ON e.sensor_id = s.sensor_id
         WHERE 1=1
     """
-    
+
     # Build filters dynamically for asyncpg ($1, $2, etc.)
     params = []
-    
+
     if start_time:
         params.append(start_time)
         query += f" AND e.last_sample_timestamp >= ${len(params)}"
-    
+
     if end_time:
         params.append(end_time)
         query += f" AND e.last_sample_timestamp <= ${len(params)}"
-        
+
     if sensor_id:
         params.append(sensor_id)
         query += f" AND e.sensor_id = ${len(params)}"
-        
+
     if region:
         params.append(region)
         query += f" AND s.region = ${len(params)}"
-        
+
     if event_type:
         params.append(event_type)
         query += f" AND e.event_type = ${len(params)}"
-        
+
     if min_freq is not None:
         params.append(min_freq)
         query += f" AND e.peak_frequency >= ${len(params)}"
-        
+
     if max_freq is not None:
         params.append(max_freq)
         query += f" AND e.peak_frequency <= ${len(params)}"
-        
+
     # Order from newest to oldest and apply the limit
     params.append(limit)
     query += f" ORDER BY e.last_sample_timestamp DESC LIMIT ${len(params)}"
@@ -288,12 +304,46 @@ async def get_historical_events(
     # Execute the query on the database
     async with db_pool.acquire() as conn:
         records = await conn.fetch(query, *params)
-        
+
     # Format the results into a list of JSON-friendly dictionaries
     results = [dict(record) for record in records]
-    
+
     return {
         "count": len(results),
-        "filters_applied": len(params) - 1, # Exclude 'limit' from the filter count
-        "data": results
+        "filters_applied": len(params) - 1,  # Exclude 'limit' from the filter count
+        "data": results,
     }
+
+
+@app.get("/api/sensors")
+async def get_sensors():
+    """Retrieves all static sensor data."""
+    if not db_pool:
+        return {"error": "Database connection unavailable"}
+
+    query = "SELECT * FROM sensors ORDER BY sensor_name ASC"
+    async with db_pool.acquire() as conn:
+        records = await conn.fetch(query)
+
+    return {"data": [dict(record) for record in records]}
+
+
+@app.get("/api/events/{event_id}")
+async def get_event_details(event_id: str):
+    """Retrieves detailed information for a specific event."""
+    if not db_pool:
+        return {"error": "Database connection unavailable"}
+
+    query = """
+        SELECT e.*, s.sensor_name, s.category, s.region, s.latitude, s.longitude, s.measurement_unit
+        FROM events e
+        JOIN sensors s ON e.sensor_id = s.sensor_id
+        WHERE e.event_id = $1
+    """
+    async with db_pool.acquire() as conn:
+        record = await conn.fetchrow(query, event_id)
+
+    if not record:
+        return {"error": "Event not found"}
+
+    return {"data": dict(record)}
