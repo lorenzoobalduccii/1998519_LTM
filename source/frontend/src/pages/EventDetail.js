@@ -1,57 +1,225 @@
-import React, { useEffect, useState } from 'react';
-import { useParams } from 'react-router-dom';
-import { API_BASE } from '../config';
+import React, { useEffect, useState } from "react";
+import { useNavigate, useParams } from "react-router-dom";
+import { API_BASE } from "../config";
+import {
+  categoryName,
+  eventTypeBadge,
+  eventTypeLabel,
+  formatAmplitude,
+  formatCoordinates,
+  formatFrequency,
+  formatUtcTimestamp,
+  sensorDisplayId,
+} from "../utils/platform";
 
 export default function EventDetail() {
+  const navigate = useNavigate();
   const { id } = useParams();
+  const [isLoading, setIsLoading] = useState(true);
   const [event, setEvent] = useState(null);
+  const [relatedEvents, setRelatedEvents] = useState([]);
 
   useEffect(() => {
-    fetch(`${API_BASE}/events/${id}`)
-      .then(res => res.json())
-      .then(data => setEvent(data.data))
-      .catch(err => console.error(err));
+    const loadEvent = async () => {
+      setIsLoading(true);
+
+      try {
+        const response = await fetch(`${API_BASE}/events/${encodeURIComponent(id)}`);
+        const payload = await response.json();
+
+        if (!payload.data) {
+          setEvent(null);
+          setRelatedEvents([]);
+          setIsLoading(false);
+          return;
+        }
+
+        setEvent(payload.data);
+
+        const historyResponse = await fetch(
+          `${API_BASE}/history?sensor_id=${encodeURIComponent(payload.data.sensor_id)}&limit=100`
+        );
+        const historyPayload = await historyResponse.json();
+        setRelatedEvents(historyPayload.data || []);
+      } catch (error) {
+        console.error(error);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    loadEvent();
   }, [id]);
 
-  if (!event) return <div style={{color: 'white', fontSize: '2vh'}}>Loading...</div>;
+  if (isLoading) {
+    return (
+      <div className="page-shell">
+        <header className="page-header">
+          <h1 className="page-title">Event Details</h1>
+        </header>
+
+        <section className="page-section">
+          <div className="detail-panel">
+            <h2 className="detail-panel__title">Loading event</h2>
+            <p className="detail-panel__copy">
+              Fetching the event payload from the gateway.
+            </p>
+          </div>
+        </section>
+      </div>
+    );
+  }
+
+  if (!event) {
+    return (
+      <div className="page-shell">
+        <header className="page-header">
+          <h1 className="page-title">Event Details</h1>
+        </header>
+
+        <section className="page-section">
+          <div className="detail-panel">
+            <h2 className="detail-panel__title">Event not found</h2>
+            <p className="detail-panel__copy">
+              The selected event is not available in the gateway data store.
+            </p>
+            <button
+              type="button"
+              className="primary-button primary-button--inline"
+              onClick={() => navigate("/history")}
+            >
+              Back to Historical Events
+            </button>
+          </div>
+        </section>
+      </div>
+    );
+  }
+
+  const endTime = new Date(event.last_sample_timestamp);
+  const startTime =
+    event.duration && !Number.isNaN(Number(event.duration))
+      ? new Date(endTime.getTime() - Number(event.duration) * 1000)
+      : endTime;
+  const previousEvent = relatedEvents.find(
+    (candidate) => candidate.event_id !== event.event_id
+  );
 
   return (
-    <div>
-      <h2 className="page-title">Event Details: {event.event_id}</h2>
-      
-      <div className="grid-container" style={{ marginBottom: '3vh' }}>
-        <div className="card">
-          <div className="card-label">Timestamp</div>
-          <div className="card-value">{new Date(event.last_sample_timestamp).toLocaleString()}</div>
-        </div>
-        <div className="card">
-          <div className="card-label">Event Type</div>
-          <div className="card-value">{event.event_type}</div>
-        </div>
-        <div className="card">
-          <div className="card-label">Sensor & Region</div>
-          <div className="card-value">{event.sensor_id} ({event.region})</div>
-        </div>
-        <div className="card">
-          <div className="card-label">Peak Amplitude</div>
-          <div className="card-value">{event.peak_amplitude.toFixed(3)} {event.measurement_unit}</div>
-        </div>
-        <div className="card">
-          <div className="card-label">Peak Frequency</div>
-          <div className="card-value">{event.peak_frequency.toFixed(2)} Hz</div>
-        </div>
-        <div className="card">
-          <div className="card-label">Duration</div>
-          <div className="card-value">{event.duration.toFixed(2)}s</div>
-        </div>
-      </div>
+    <div className="page-shell">
+      <header className="page-header">
+        <h1 className="page-title">Event Details</h1>
+      </header>
 
-      <div className="placeholder-box chart-placeholder">
-        [Waveform / Chart Placeholder]
-      </div>
-      <div className="placeholder-box map-placeholder">
-        [Map Placeholder - Pin at Lat: {event.latitude}, Lng: {event.longitude}]
-      </div>
+      <section className="page-section">
+        <div className="section-label">Event Header</div>
+
+        <div className="event-header-card">
+          <div className="event-header-card__identity">
+            <div className="data-list__label">Event ID</div>
+            <div className="event-header-card__event-id">{event.event_id}</div>
+          </div>
+
+          <span className="pill">{eventTypeBadge(event.event_type)}</span>
+
+          <div className="event-header-card__timing">
+            <div>Start {formatUtcTimestamp(startTime)}</div>
+            <div>End {formatUtcTimestamp(endTime)}</div>
+          </div>
+
+          <button
+            type="button"
+            className="primary-button primary-button--inline"
+            onClick={() => navigate("/history")}
+          >
+            Back to Historical Events
+          </button>
+        </div>
+      </section>
+
+      <section className="page-section">
+        <div className="section-label">Details</div>
+
+        <div className="detail-panels">
+          <article className="detail-panel">
+            <h2 className="detail-panel__title">Event Data</h2>
+
+            <div className="detail-list">
+              <div className="detail-list__item">
+                <span className="detail-list__label">Classification</span>
+                <span className="detail-list__value">
+                  {eventTypeLabel(event.event_type)}
+                </span>
+              </div>
+
+              <div className="detail-list__item">
+                <span className="detail-list__label">Dominant Frequency</span>
+                <span className="detail-list__value">
+                  {formatFrequency(event.peak_frequency)}
+                </span>
+              </div>
+
+              <div className="detail-list__item">
+                <span className="detail-list__label">Peak Amplitude</span>
+                <span className="detail-list__value detail-list__value--accent">
+                  {formatAmplitude(event.peak_amplitude, event.measurement_unit)}
+                </span>
+              </div>
+            </div>
+          </article>
+
+          <article className="detail-panel">
+            <h2 className="detail-panel__title">Sensor Data</h2>
+
+            <div className="detail-grid">
+              <div className="detail-list__item">
+                <span className="detail-list__label">Sensor ID</span>
+                <span className="detail-list__value">
+                  {sensorDisplayId(event.sensor_id)}
+                </span>
+              </div>
+
+              <div className="detail-list__item">
+                <span className="detail-list__label">Sensor History</span>
+                <span className="detail-list__value">
+                  {relatedEvents.length} stored events
+                </span>
+              </div>
+
+              <div className="detail-list__item">
+                <span className="detail-list__label">Category</span>
+                <span className="detail-list__value">
+                  {categoryName(event.category)}
+                </span>
+              </div>
+
+              <div className="detail-list__item">
+                <span className="detail-list__label">Last Sensor Event</span>
+                <span className="detail-list__value">{event.event_id}</span>
+              </div>
+
+              <div className="detail-list__item">
+                <span className="detail-list__label">Region</span>
+                <span className="detail-list__value">{event.region}</span>
+              </div>
+
+              <div className="detail-list__item">
+                <span className="detail-list__label">Previous Event</span>
+                <span className="detail-list__value">
+                  {previousEvent?.event_id || "N/A"}
+                </span>
+              </div>
+
+              <div className="detail-list__item">
+                <span className="detail-list__label">Coordinates</span>
+                <span className="detail-list__value">
+                  {formatCoordinates(event.latitude, event.longitude)}
+                </span>
+              </div>
+            </div>
+          </article>
+        </div>
+      </section>
     </div>
   );
 }
