@@ -12,12 +12,14 @@ Responsibilities:
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import signal
 import sys
 from collections import deque
+from datetime import datetime
 
 import asyncpg
 import httpx
@@ -35,28 +37,32 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
 )
 log = logging.getLogger("replica")
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 # ---------------------------------------------------------------------------
 # Configuration (override via environment variables)
 # ---------------------------------------------------------------------------
-ALLOWED_HTTP_PORTS = {8000, 8002, 8004, 8006, 8008, 8010}
-
-BROKER_URLS = ["ws://localhost:9000/ws/ingest"]
-HTTP_HOST = "0.0.0.0"
+raw_broker_urls = os.getenv("BROKER_URLS") or os.getenv(
+    "BROKER_URL", "ws://localhost:9000/ws/ingest"
+)
+BROKER_URLS = [url.strip() for url in raw_broker_urls.split(",") if url.strip()]
+HTTP_HOST = os.getenv("HTTP_HOST", "0.0.0.0")
 HTTP_PORT = int(os.getenv("HTTP_PORT", "8000"))
-
-if HTTP_PORT not in ALLOWED_HTTP_PORTS:
-    raise ValueError(
-        f"Unsupported HTTP_PORT '{HTTP_PORT}'. Use one of: {sorted(ALLOWED_HTTP_PORTS)}"
-    )
 
 DB_DSN = os.getenv(
     "DB_DSN",
     "postgresql://replica:replica@localhost:5432/seismic",
 )
 
-GATEWAY_URL = "http://localhost:8001/api/events"
-SIMULATOR_URL = "http://localhost:8080"
+GATEWAY_URL = os.getenv("GATEWAY_URL", "http://localhost:8001/api/events")
+SIMULATOR_URL = os.getenv("SIMULATOR_URL", "http://localhost:8080")
+CONTROL_STREAM_ENABLED = os.getenv("CONTROL_STREAM_ENABLED", "false").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 # Sliding-window & analysis parameters
 WINDOW_SIZE = int(os.getenv("WINDOW_SIZE", "200"))
@@ -82,7 +88,6 @@ windows: dict[str, deque] = {}
 # Tracking counters for the overlapping window
 sample_counters: dict[str, int] = {}
 cooldown_counters: dict[str, int] = {}
-event_counters: dict[str, int] = {}
 
 # Sampling-rate cache          {sensor_id: float}
 sampling_rates: dict[str, float] = {}
@@ -162,28 +167,34 @@ async def persist_event(event: dict) -> None:
         return
 
     try:
+        timestamp = event["last_sample_timestamp"]
+        if isinstance(timestamp, str):
+            timestamp = datetime.fromisoformat(timestamp)
+
         async with db_pool.acquire() as conn:
-            await conn.execute(
+            status = await conn.execute(
                 """
                 INSERT INTO events
-                    (sensor_id, event_type, last_sample_timestamp,
-                     peak_frequency, peak_amplitude, duration)
-                VALUES ($1, $2, $3::timestamptz, $4, $5, $6)
-                ON CONFLICT (sensor_id, last_sample_timestamp) DO NOTHING;
+                    (event_id, sensor_id, event_type, last_sample_timestamp,
+                     peak_frequency, peak_amplitude)
+                VALUES ($1, $2, $3, $4::timestamptz, $5, $6)
+                ON CONFLICT (event_id) DO NOTHING;
                 """,
+                event["event_id"],
+                event["sensor_id"],
+                event["event_type"],
+                timestamp,
+                event["peak_frequency"],
+                event["peak_amplitude"],
+            )
+        if status.endswith("1"):
+            log.info(
+                "Event persisted: event_id=%s sensor=%s type=%s ts=%s",
+                event["event_id"],
                 event["sensor_id"],
                 event["event_type"],
                 event["last_sample_timestamp"],
-                event["peak_frequency"],
-                event["peak_amplitude"],
-                event["duration"],
             )
-        log.info(
-            "Event persisted: sensor=%s type=%s ts=%s",
-            event["sensor_id"],
-            event["event_type"],
-            event["last_sample_timestamp"],
-        )
     except Exception as exc:
         log.error("DB error persisting event: %s", exc)
 
@@ -196,17 +207,16 @@ async def persist_event(event: dict) -> None:
 async def forward_to_gateway(event: dict) -> None:
     """POST the event to the Gateway — fire-and-forget style."""
     payload = {
+        "event_id": event["event_id"],
         "sensor_id": event["sensor_id"],
         "event_type": event["event_type"],
         "last_sample_timestamp": event["last_sample_timestamp"],
         "peak_frequency": event["peak_frequency"],
         "peak_amplitude": event["peak_amplitude"],
-        "duration": event["duration"],
     }
     try:
         resp = await http_client.post(GATEWAY_URL, json=payload, timeout=5.0)
         resp.raise_for_status()
-        log.info("Event forwarded to Gateway (status %s).", resp.status_code)
     except Exception as exc:
         log.error("Gateway forward error: %s", exc)
 
@@ -225,6 +235,13 @@ def classify_frequency(freq_hz: float) -> str | None:
     if freq_hz >= 8.0:
         return "nuclear_like"
     return None  # below 0.5 Hz — not classifiable
+
+
+def build_event_id(sensor_id: str, timestamp: str | datetime, event_type: str) -> str:
+    """Build a deterministic event id stable across replica restarts."""
+    timestamp_key = timestamp if isinstance(timestamp, str) else timestamp.isoformat()
+    raw_key = f"{sensor_id}|{timestamp_key}|{event_type}"
+    return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
 
 
 def analyse_window(
@@ -287,7 +304,6 @@ async def process_message(raw: str) -> None:
         windows[sensor_id] = deque(maxlen=WINDOW_SIZE)
         sample_counters[sensor_id] = 0
         cooldown_counters[sensor_id] = 0
-        event_counters[sensor_id] = 0
 
     # Append new data
     win = windows[sensor_id]
@@ -325,8 +341,7 @@ async def process_message(raw: str) -> None:
         return  # frequency below detectable bands
 
     # ---- Event detected! ---------------------------------------------------
-    event_counters[sensor_id] += 1
-    event_id = f"{sensor_id}-{event_counters[sensor_id]}"
+    event_id = build_event_id(sensor_id, timestamp, event_type)
 
     event = {
         "event_id": event_id,
@@ -411,6 +426,10 @@ async def listen_control_stream() -> None:
     When {"command": "SHUTDOWN"} is received, sets the global shutdown_event.
     Retries on transient connection errors.
     """
+    if not CONTROL_STREAM_ENABLED:
+        log.info("SSE control stream disabled.")
+        return
+
     control_url = f"{SIMULATOR_URL}/api/control"
     backoff = 1.0
 
@@ -435,6 +454,14 @@ async def listen_control_stream() -> None:
                             return
         except asyncio.CancelledError:
             raise
+        except httpx.ConnectError:
+            if shutdown_event.is_set():
+                return
+            log.warning(
+                "SSE control stream unreachable at %s — retrying in %.1fs",
+                control_url,
+                backoff,
+            )
         except (httpx.ReadError, httpx.RemoteProtocolError, httpx.ReadTimeout) as exc:
             if shutdown_event.is_set():
                 return
@@ -543,11 +570,12 @@ async def main() -> None:
     # Initialise shared resources
     http_client = httpx.AsyncClient()
     log.info(
-        "Replica starting with health=http://%s:%d/health broker=%s gateway=%s",
+        "Replica starting with health=http://%s:%d/health broker=%s gateway=%s control_stream=%s",
         HTTP_HOST,
         HTTP_PORT,
         BROKER_URLS[0],
         GATEWAY_URL,
+        "enabled" if CONTROL_STREAM_ENABLED else "disabled",
     )
     try:
         await connect_db()
@@ -556,12 +584,15 @@ async def main() -> None:
         log.warning("Database unavailable, continuing without persistence: %s", exc)
 
     # Launch all background tasks
-    await asyncio.gather(
+    tasks = [
         run_health_server(),
         consume_broker_stream(),
-        listen_control_stream(),
         graceful_shutdown(),
-    )
+    ]
+    if CONTROL_STREAM_ENABLED:
+        tasks.append(listen_control_stream())
+
+    await asyncio.gather(*tasks)
 
 
 if __name__ == "__main__":

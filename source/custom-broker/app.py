@@ -26,6 +26,8 @@ class BrokerConfig:
     broker_host: str
     broker_port: int
     replica_ingest_path: str
+    expected_replica_count: int
+    startup_barrier_poll_interval: float
 
     @classmethod
     def from_env(cls) -> "BrokerConfig":
@@ -34,6 +36,10 @@ class BrokerConfig:
             broker_host=os.getenv("BROKER_HOST", "0.0.0.0"),
             broker_port=int(os.getenv("BROKER_PORT", "9000")),
             replica_ingest_path=os.getenv("REPLICA_INGEST_PATH", "/ws/ingest"),
+            expected_replica_count=int(os.getenv("EXPECTED_REPLICA_COUNT", "5")),
+            startup_barrier_poll_interval=float(
+                os.getenv("STARTUP_BARRIER_POLL_INTERVAL", "0.5")
+            ),
         )
 
 
@@ -69,12 +75,14 @@ class Broker:
         self.tasks: list[asyncio.Task[Any]] = []
 
     async def run(self) -> None:
-        await self._discover_sensors()
         self.replica_server = await websockets.serve(
             self._handle_replica_connection,
             self.config.broker_host,
             self.config.broker_port,
         )
+
+        await self._wait_for_replica_quorum()
+        await self._discover_sensors()
 
         for sensor in self.sensors:
             self.tasks.append(
@@ -131,6 +139,39 @@ class Broker:
 
         self.sensors = [self._parse_sensor(item) for item in data]
         logger.info("Discovered %d sensors", len(self.sensors))
+
+    async def _wait_for_replica_quorum(self) -> None:
+        expected = self.config.expected_replica_count
+        if expected <= 0:
+            return
+
+        logger.info(
+            "Waiting for %d replicas before starting sensor streams",
+            expected,
+        )
+        last_reported = -1
+
+        while not self.stop_event.is_set():
+            async with self.replica_lock:
+                connected = len(self.replicas)
+
+            if connected >= expected:
+                logger.info(
+                    "Startup barrier satisfied: %d/%d replicas connected",
+                    connected,
+                    expected,
+                )
+                return
+
+            if connected != last_reported:
+                logger.info(
+                    "Replica barrier progress: %d/%d connected",
+                    connected,
+                    expected,
+                )
+                last_reported = connected
+
+            await asyncio.sleep(self.config.startup_barrier_poll_interval)
 
     def _parse_sensor(self, data: dict[str, Any]) -> Sensor:
         coordinates = data.get("coordinates") or {}

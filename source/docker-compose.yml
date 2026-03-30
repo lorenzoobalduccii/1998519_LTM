@@ -1,0 +1,169 @@
+services:
+  simulator:
+    image: seismic-signal-simulator:multiarch_v1
+    container_name: seismic-simulator
+    environment:
+      SAMPLING_RATE_HZ: "20"
+      AUTO_SHUTDOWN_ENABLED: "true"
+      AUTO_SHUTDOWN_MIN_SECONDS: "20"
+      AUTO_SHUTDOWN_MAX_SECONDS: "30"
+    ports:
+      - "8080:8080"
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: seismic-postgres
+    environment:
+      POSTGRES_DB: seismic
+      POSTGRES_USER: replica
+      POSTGRES_PASSWORD: replica
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U replica -d seismic"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  gateway:
+    build:
+      context: ./gateway
+      dockerfile: Dockerfile
+    container_name: seismic-gateway
+    environment:
+      DB_DSN: postgresql://replica:replica@postgres:5432/seismic
+      REPLICA_URLS: http://replica-1:8000,http://replica-2:8000,http://replica-3:8000,http://replica-4:8000,http://replica-5:8000
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8001:8001"
+
+  custom-broker:
+    build:
+      context: ./custom-broker
+      dockerfile: Dockerfile
+    container_name: seismic-broker
+    environment:
+      SIMULATOR_BASE_URL: http://simulator:8080
+      BROKER_HOST: 0.0.0.0
+      BROKER_PORT: 9000
+      REPLICA_INGEST_PATH: /ws/ingest
+      EXPECTED_REPLICA_COUNT: 5
+      STARTUP_BARRIER_POLL_INTERVAL: 0.5
+    depends_on:
+      simulator:
+        condition: service_started
+    ports:
+      - "9000:9000"
+
+  replica-1:
+    build:
+      context: ./processing-replica
+      dockerfile: Dockerfile
+    environment:
+      HTTP_PORT: 8000
+      BROKER_URL: ws://custom-broker:9000/ws/ingest
+      GATEWAY_URL: http://gateway:8001/api/events
+      DB_DSN: postgresql://replica:replica@postgres:5432/seismic
+      SIMULATOR_URL: http://simulator:8080
+      CONTROL_STREAM_ENABLED: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      simulator:
+        condition: service_started
+      custom-broker:
+        condition: service_started
+      gateway:
+        condition: service_started
+
+  replica-2:
+    build:
+      context: ./processing-replica
+      dockerfile: Dockerfile
+    environment:
+      HTTP_PORT: 8000
+      BROKER_URL: ws://custom-broker:9000/ws/ingest
+      GATEWAY_URL: http://gateway:8001/api/events
+      DB_DSN: postgresql://replica:replica@postgres:5432/seismic
+      SIMULATOR_URL: http://simulator:8080
+      CONTROL_STREAM_ENABLED: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      simulator:
+        condition: service_started
+      custom-broker:
+        condition: service_started
+      gateway:
+        condition: service_started
+
+  replica-3:
+    build:
+      context: ./processing-replica
+      dockerfile: Dockerfile
+    environment:
+      HTTP_PORT: 8000
+      BROKER_URL: ws://custom-broker:9000/ws/ingest
+      GATEWAY_URL: http://gateway:8001/api/events
+      DB_DSN: postgresql://replica:replica@postgres:5432/seismic
+      SIMULATOR_URL: http://simulator:8080
+      CONTROL_STREAM_ENABLED: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      simulator:
+        condition: service_started
+      custom-broker:
+        condition: service_started
+      gateway:
+        condition: service_started
+
+  replica-4:
+    build:
+      context: ./processing-replica
+      dockerfile: Dockerfile
+    environment:
+      HTTP_PORT: 8000
+      BROKER_URL: ws://custom-broker:9000/ws/ingest
+      GATEWAY_URL: http://gateway:8001/api/events
+      DB_DSN: postgresql://replica:replica@postgres:5432/seismic
+      SIMULATOR_URL: http://simulator:8080
+      CONTROL_STREAM_ENABLED: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      simulator:
+        condition: service_started
+      custom-broker:
+        condition: service_started
+      gateway:
+        condition: service_started
+
+  replica-5:
+    build:
+      context: ./processing-replica
+      dockerfile: Dockerfile
+    environment:
+      HTTP_PORT: 8000
+      BROKER_URL: ws://custom-broker:9000/ws/ingest
+      GATEWAY_URL: http://gateway:8001/api/events
+      DB_DSN: postgresql://replica:replica@postgres:5432/seismic
+      SIMULATOR_URL: http://simulator:8080
+      CONTROL_STREAM_ENABLED: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      simulator:
+        condition: service_started
+      custom-broker:
+        condition: service_started
+      gateway:
+        condition: service_started
+
+volumes:
+  postgres-data:

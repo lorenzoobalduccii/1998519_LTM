@@ -6,7 +6,7 @@ Fa tre cose:
 2. apre una WebSocket per ogni sensore usando `websocket_url`
 3. espone una WebSocket server e fa broadcast di ogni misura a tutte le repliche connesse
 
-Niente reconnect.
+All'avvio aspetta che si colleghino tutte le repliche attese prima di iniziare a leggere gli stream dei sensori.
 
 ## Contratto usato
 
@@ -49,6 +49,8 @@ Verso ogni replica il broker invia:
 - `BROKER_PORT` default `9000`
 - `REPLICA_INGEST_PATH` default `/ws/ingest`
 - `BROKER_URL` solo per `esempio_replica.py`, default `ws://localhost:9000/ws/ingest`
+- `EXPECTED_REPLICA_COUNT` default `5`
+- `STARTUP_BARRIER_POLL_INTERVAL` default `0.5`
 
 ## Avvio locale
 
@@ -95,3 +97,4 @@ custom-broker:
 - I sensori non sono hardcoded.
 - Le repliche devono collegarsi al broker come client WebSocket.
 - L'endpoint del broker per le repliche e `ws://<broker-host>:9000/ws/ingest`.
+- Gli stream dei sensori partono solo quando il broker vede tutte le repliche attese.

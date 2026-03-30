@@ -9,6 +9,7 @@ import httpx
 import json
 import os
 import logging
+from urllib.parse import urlsplit
 
 import asyncpg
 from typing import Optional
@@ -21,14 +22,24 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] gateway — %(message)s",
 )
 log = logging.getLogger("gateway")
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 
 # ==========================================
 # 2. CONFIGURATION & STATE
 # ==========================================
-# Hardcoded local topology for processing replicas on fixed even ports.
-REPLICA_PORTS = [8000, 8002, 8004, 8006, 8008, 8010]
-ALL_INITIAL_REPLICAS = [
-    f"http://127.0.0.1:{port}" for port in REPLICA_PORTS
+# Defaults for local runs; Docker Compose can override via REPLICA_URLS.
+DEFAULT_REPLICA_PORTS = [8000, 8002, 8004, 8006, 8008, 8010]
+raw_replicas = os.getenv("REPLICA_URLS")
+if raw_replicas:
+    ALL_INITIAL_REPLICAS = [url.strip() for url in raw_replicas.split(",") if url.strip()]
+else:
+    ALL_INITIAL_REPLICAS = [
+        f"http://127.0.0.1:{port}" for port in DEFAULT_REPLICA_PORTS
+    ]
+REPLICA_PORTS = [
+    parsed.port for parsed in (urlsplit(url) for url in ALL_INITIAL_REPLICAS) if parsed.port
 ]
 
 active_replicas = list(ALL_INITIAL_REPLICAS)
@@ -145,19 +156,36 @@ async def receive_event(payload: dict):
     Implements deduplication to handle multiple replicas[cite: 71, 98].
     """
     sensor_id = payload.get("sensor_id")
-    timestamp = payload.get("last_sample_timestamp")
-    event_id = f"{sensor_id}_{timestamp}"
+    event_id = payload.get("event_id")
+
+    if not event_id:
+        return {"status": "error", "reason": "missing_event_id"}
+
+    normalized_payload = dict(payload)
+    normalized_payload["event_id"] = event_id
 
     # Duplicate check
     if event_id in recent_events_cache:
-        log.info(f"Duplicate event ignored: {event_id}")
+        log.info(
+            "DUPLICATE: event_id=%s type=%s sensor=%s amp=%s",
+            event_id,
+            normalized_payload.get("event_type"),
+            sensor_id,
+            normalized_payload.get("peak_amplitude"),
+        )
         return {"status": "ignored", "reason": "duplicate"}
 
     recent_events_cache.append(event_id)
-    log.info(f"ALERT: {payload.get('event_type')} from {sensor_id} (Amp: {payload.get('peak_amplitude')})")
+    log.info(
+        "ALERT: event_id=%s type=%s sensor=%s amp=%s",
+        event_id,
+        normalized_payload.get("event_type"),
+        sensor_id,
+        normalized_payload.get("peak_amplitude"),
+    )
     
     # Forward to Live Feed via WebSocket [cite: 110]
-    await ws_manager.broadcast(payload)
+    await ws_manager.broadcast(normalized_payload)
     
     return {"status": "dispatched", "event_id": event_id}
 
@@ -166,6 +194,7 @@ async def get_system_status():
     """Node status monitoring for the dashboard[cite: 109]."""
     return {
         "status": "operational" if active_replicas else "critical",
+        "configured_replicas": ALL_INITIAL_REPLICAS,
         "configured_ports": REPLICA_PORTS,
         "nodes": {
             "total": len(ALL_INITIAL_REPLICAS),
@@ -213,7 +242,7 @@ async def get_historical_events(
     # Base query with JOIN between events and sensors
     query = """
         SELECT 
-            e.id, e.sensor_id, e.event_type, e.last_sample_timestamp, 
+            e.id, e.event_id, e.sensor_id, e.event_type, e.last_sample_timestamp, 
             e.peak_frequency, e.peak_amplitude, e.duration,
             s.region, s.sensor_name
         FROM events e
