@@ -10,6 +10,7 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx
 import websockets
+from websockets.exceptions import ConnectionClosedOK
 
 
 logging.basicConfig(
@@ -22,18 +23,16 @@ logger = logging.getLogger("custom_broker")
 @dataclass(slots=True)
 class BrokerConfig:
     simulator_base_url: str
-    replica_urls: list[str]
+    broker_host: str
+    broker_port: int
     replica_ingest_path: str
 
     @classmethod
     def from_env(cls) -> "BrokerConfig":
         return cls(
             simulator_base_url=os.getenv("SIMULATOR_BASE_URL", "http://simulator:8080"),
-            replica_urls=[
-                item.strip()
-                for item in os.getenv("REPLICA_URLS", "").split(",")
-                if item.strip()
-            ],
+            broker_host=os.getenv("BROKER_HOST", "0.0.0.0"),
+            broker_port=int(os.getenv("BROKER_PORT", "9000")),
             replica_ingest_path=os.getenv("REPLICA_INGEST_PATH", "/ws/ingest"),
         )
 
@@ -52,9 +51,7 @@ class Sensor:
 
 @dataclass(slots=True)
 class ReplicaConnection:
-    base_url: str
-    ingest_url: str
-    connected: bool = False
+    replica_id: int
     websocket: Any = None
     send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
@@ -65,25 +62,19 @@ class Broker:
         self.http_client = httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=10.0))
         self.stop_event = asyncio.Event()
         self.sensors: list[Sensor] = []
-        self.replicas = [
-            ReplicaConnection(
-                base_url=replica_url,
-                ingest_url=self._build_replica_ingest_url(replica_url),
-            )
-            for replica_url in config.replica_urls
-        ]
+        self.replicas: dict[int, ReplicaConnection] = {}
+        self.next_replica_id = 1
+        self.replica_lock = asyncio.Lock()
+        self.replica_server: Any = None
         self.tasks: list[asyncio.Task[Any]] = []
 
     async def run(self) -> None:
         await self._discover_sensors()
-
-        for replica in self.replicas:
-            self.tasks.append(
-                asyncio.create_task(
-                    self._replica_connection_manager(replica),
-                    name=f"replica-{replica.base_url}",
-                )
-            )
+        self.replica_server = await websockets.serve(
+            self._handle_replica_connection,
+            self.config.broker_host,
+            self.config.broker_port,
+        )
 
         for sensor in self.sensors:
             self.tasks.append(
@@ -94,9 +85,11 @@ class Broker:
             )
 
         logger.info(
-            "Broker started with %d sensors and %d replicas",
+            "Broker started with %d sensors, replica ingress on %s:%d%s",
             len(self.sensors),
-            len(self.replicas),
+            self.config.broker_host,
+            self.config.broker_port,
+            self.config.replica_ingest_path,
         )
 
         await self.stop_event.wait()
@@ -111,12 +104,18 @@ class Broker:
             with suppress(asyncio.CancelledError):
                 await task
 
-        for replica in self.replicas:
+        if self.replica_server is not None:
+            self.replica_server.close()
+            await self.replica_server.wait_closed()
+
+        async with self.replica_lock:
+            replicas = list(self.replicas.values())
+            self.replicas.clear()
+
+        for replica in replicas:
             if replica.websocket is not None:
                 with suppress(Exception):
                     await replica.websocket.close()
-                replica.websocket = None
-                replica.connected = False
 
         await self.http_client.aclose()
 
@@ -186,57 +185,68 @@ class Broker:
                     await websocket.close()
 
     async def _broadcast(self, message: str) -> None:
-        connected_replicas = [
-            replica
-            for replica in self.replicas
-            if replica.connected and replica.websocket is not None
-        ]
+        async with self.replica_lock:
+            connected_replicas = list(self.replicas.values())
 
         if not connected_replicas:
             return
 
         await asyncio.gather(
-            *(self._send_to_replica(replica, message) for replica in connected_replicas)
+            *(self._send_to_replica(replica, message) for replica in connected_replicas),
+            return_exceptions=True,
         )
 
     async def _send_to_replica(self, replica: ReplicaConnection, message: str) -> None:
         async with replica.send_lock:
             websocket = replica.websocket
-            if websocket is None or not replica.connected:
+            if websocket is None:
                 return
 
             try:
                 await websocket.send(message)
             except asyncio.CancelledError:
                 raise
+            except ConnectionClosedOK:
+                with suppress(Exception):
+                    await websocket.close()
+                replica.websocket = None
             except Exception as exc:
-                logger.warning("Replica %s send failed: %s", replica.base_url, exc)
-                replica.connected = False
+                logger.warning("Replica %s send failed: %s", replica.replica_id, exc)
                 with suppress(Exception):
                     await websocket.close()
                 replica.websocket = None
 
-    async def _replica_connection_manager(self, replica: ReplicaConnection) -> None:
-        websocket = None
-        try:
-            logger.info("Connecting to replica %s", replica.ingest_url)
-            websocket = await websockets.connect(replica.ingest_url)
-            replica.websocket = websocket
-            replica.connected = True
+    async def _handle_replica_connection(self, websocket: Any) -> None:
+        path = self._get_connection_path(websocket)
+        if path is not None and path != self.config.replica_ingest_path:
+            logger.warning("Rejected replica on unexpected path %s", path)
+            await websocket.close(code=1008, reason="Invalid path")
+            return
 
+        async with self.replica_lock:
+            replica = ReplicaConnection(
+                replica_id=self.next_replica_id,
+                websocket=websocket,
+            )
+            self.replicas[replica.replica_id] = replica
+            self.next_replica_id += 1
+            total_connected = len(self.replicas)
+
+        logger.info("Replica %s connected (total=%s)", replica.replica_id, total_connected)
+
+        try:
             await websocket.wait_closed()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.warning("Replica %s unavailable: %s", replica.base_url, exc)
+            logger.warning("Replica %s closed with error: %s", replica.replica_id, exc)
         finally:
-            if replica.websocket is websocket:
-                replica.websocket = None
-            replica.connected = False
-
-            if websocket is not None:
-                with suppress(Exception):
-                    await websocket.close()
+            async with self.replica_lock:
+                self.replicas.pop(replica.replica_id, None)
+                total_connected = len(self.replicas)
+            with suppress(Exception):
+                await websocket.close()
+            logger.info("Replica %s disconnected (total=%s)", replica.replica_id, total_connected)
 
     def _build_sensor_ws_url(self, websocket_path: str) -> str:
         base = urlsplit(self.config.simulator_base_url)
@@ -251,20 +261,11 @@ class Broker:
         )
         return urljoin(ws_base, websocket_path)
 
-    def _build_replica_ingest_url(self, replica_base_url: str) -> str:
-        base = urlsplit(replica_base_url)
-        scheme = {
-            "http": "ws",
-            "https": "wss",
-            "ws": "ws",
-            "wss": "wss",
-        }.get(base.scheme, "ws")
-
-        ingest_path = self.config.replica_ingest_path
-        if not ingest_path.startswith("/"):
-            ingest_path = f"/{ingest_path}"
-
-        return urlunsplit((scheme, base.netloc, ingest_path, "", ""))
+    def _get_connection_path(self, websocket: Any) -> str | None:
+        request = getattr(websocket, "request", None)
+        if request is not None:
+            return getattr(request, "path", None)
+        return getattr(websocket, "path", None)
 
 
 async def main() -> None:

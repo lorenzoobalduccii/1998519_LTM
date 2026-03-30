@@ -1,13 +1,18 @@
 import asyncio
-from websockets.server import serve
+import os
 
-async def handler(ws):
-    print("Replica 9001 connessa")
-    async for msg in ws:
-        print("9001 <-", msg)
+import websockets
 
-async def main():
-    async with serve(handler, "0.0.0.0", 9001):
-        await asyncio.Future()
 
-asyncio.run(main())
+BROKER_URL = os.getenv("BROKER_URL", "ws://localhost:9000/ws/ingest")
+
+
+async def main() -> None:
+    async with websockets.connect(BROKER_URL) as websocket:
+        print(f"Connected to broker at {BROKER_URL}")
+        async for message in websocket:
+            print(message)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

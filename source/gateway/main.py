@@ -25,10 +25,11 @@ log = logging.getLogger("gateway")
 # ==========================================
 # 2. CONFIGURATION & STATE
 # ==========================================
-# In Docker, we will pass the service names (e.g., http://replica-1:8000) 
-# comma-separated via the REPLICA_URLS environment variable.
-raw_replicas = os.getenv("REPLICA_URLS", "http://127.0.0.1:8000,http://127.0.0.1:8001")
-ALL_INITIAL_REPLICAS = [r.strip() for r in raw_replicas.split(",") if r.strip()]
+# Hardcoded local topology for processing replicas on fixed even ports.
+REPLICA_PORTS = [8000, 8002, 8004, 8006, 8008, 8010]
+ALL_INITIAL_REPLICAS = [
+    f"http://127.0.0.1:{port}" for port in REPLICA_PORTS
+]
 
 active_replicas = list(ALL_INITIAL_REPLICAS)
 dead_replicas = []
@@ -72,22 +73,27 @@ ws_manager = ConnectionManager()
 # 4. HEALTH CHECK TASK (Fault Tolerance [cite: 105, 106, 137])
 # ==========================================
 async def ping_replicas_continuously():
-    """Automatically detects failed nodes and removes them from the pool[cite: 106]."""
+    """Refresh replica health from a fixed set of local ports."""
+    global active_replicas
+    global dead_replicas
+
     async with httpx.AsyncClient(timeout=2.0) as client:
         while True:
-            for replica_url in active_replicas[:]:
+            healthy_replicas = []
+            unreachable_replicas = []
+
+            for replica_url in ALL_INITIAL_REPLICAS:
                 try:
                     response = await client.get(f"{replica_url}/health")
                     if response.status_code != 200:
                         raise httpx.ConnectError("Unhealthy status")
+                    healthy_replicas.append(replica_url)
                 except (httpx.ConnectError, httpx.ReadTimeout):
-                    log.error(f"Replica FAILURE detected: {replica_url}. Removing from pool.")
-                    active_replicas.remove(replica_url)
-                    dead_replicas.append(replica_url)
-            
-            if not active_replicas:
-                log.critical("ALL REPLICAS ARE DEAD. System cannot process new events.")
-            
+                    unreachable_replicas.append(replica_url)
+
+            active_replicas = healthy_replicas
+            dead_replicas = unreachable_replicas
+
             await asyncio.sleep(5)
 
 # ==========================================
@@ -144,10 +150,11 @@ async def receive_event(payload: dict):
 
     # Duplicate check
     if event_id in recent_events_cache:
+        log.info(f"Duplicate event ignored: {event_id}")
         return {"status": "ignored", "reason": "duplicate"}
 
     recent_events_cache.append(event_id)
-    log.info(f"🚨 ALERT: {payload.get('event_type')} from {sensor_id} (Amp: {payload.get('peak_amplitude')})")
+    log.info(f"ALERT: {payload.get('event_type')} from {sensor_id} (Amp: {payload.get('peak_amplitude')})")
     
     # Forward to Live Feed via WebSocket [cite: 110]
     await ws_manager.broadcast(payload)
@@ -159,6 +166,7 @@ async def get_system_status():
     """Node status monitoring for the dashboard[cite: 109]."""
     return {
         "status": "operational" if active_replicas else "critical",
+        "configured_ports": REPLICA_PORTS,
         "nodes": {
             "total": len(ALL_INITIAL_REPLICAS),
             "online": len(active_replicas),

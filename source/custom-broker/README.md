@@ -4,7 +4,9 @@ Fa tre cose:
 
 1. legge i sensori con `GET /api/devices/`
 2. apre una WebSocket per ogni sensore usando `websocket_url`
-3. fa broadcast di ogni misura a tutte le repliche connesse
+3. espone una WebSocket server e fa broadcast di ogni misura a tutte le repliche connesse
+
+Niente reconnect.
 
 ## Contratto usato
 
@@ -43,8 +45,10 @@ Verso ogni replica il broker invia:
 ## Variabili ambiente
 
 - `SIMULATOR_BASE_URL` default `http://simulator:8080`
-- `REPLICA_URLS` lista separata da virgole, per esempio `ws://processing-1:9000,ws://processing-2:9000`
+- `BROKER_HOST` default `0.0.0.0`
+- `BROKER_PORT` default `9000`
 - `REPLICA_INGEST_PATH` default `/ws/ingest`
+- `BROKER_URL` solo per `esempio_replica.py`, default `ws://localhost:9000/ws/ingest`
 
 ## Avvio locale
 
@@ -56,13 +60,18 @@ pip install -r requirements.txt
 python app.py
 ```
 
+In un altro terminale puoi provare una replica client con:
+
+```bash
+python esempio_replica.py
+```
+
 ## Docker
 
 ```bash
 docker build -t custom-broker ./source/custom-broker
-docker run --rm \
+docker run --rm -p 9000:9000 \
   -e SIMULATOR_BASE_URL=http://simulator:8080 \
-  -e REPLICA_URLS=ws://processing-1:9000,ws://processing-2:9000,ws://processing-3:9000 \
   custom-broker
 ```
 
@@ -72,8 +81,17 @@ docker run --rm \
 custom-broker:
   build:
     context: ./custom-broker
+  ports:
+    - "9000:9000"
   environment:
     SIMULATOR_BASE_URL: http://simulator:8080
-    REPLICA_URLS: ws://processing-1:9000,ws://processing-2:9000,ws://processing-3:9000
+    BROKER_HOST: 0.0.0.0
+    BROKER_PORT: 9000
     REPLICA_INGEST_PATH: /ws/ingest
 ```
+
+## Note
+
+- I sensori non sono hardcoded.
+- Le repliche devono collegarsi al broker come client WebSocket.
+- L'endpoint del broker per le repliche e `ws://<broker-host>:9000/ws/ingest`.

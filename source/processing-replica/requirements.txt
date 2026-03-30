@@ -1,0 +1,7 @@
+asyncpg
+fastapi
+httpx
+httpx-sse
+numpy
+uvicorn[standard]
+websockets

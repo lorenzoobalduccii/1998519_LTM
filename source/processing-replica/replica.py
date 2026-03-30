@@ -4,16 +4,12 @@ replica.py — Seismic Signal Processing Replica Node
 Part of a fault-tolerant, distributed seismic analysis platform.
 
 Responsibilities:
-  • Receive real-time ground-velocity measurements from the Broker via WebSocket (/ws/ingest)
+  • Connect to the Broker via WebSocket and receive real-time ground-velocity measurements
   • Maintain a per-sensor sliding window (200 samples) and run DFT-based anomaly detection
   • Persist sensor metadata and detected events to PostgreSQL (asyncpg)
   • Forward detected events to the Gateway via HTTP POST (httpx)
   • Listen for SHUTDOWN commands from the simulator's /api/control SSE endpoint
 """
-
-# NOTE: This currently only works within cmd manual execution. Use it with app.py changing the default urls into BrokerConfig: 
-#           - simulator_base_url=os.getenv("SIMULATOR_BASE_URL", "http://localhost:8080")
-#           - for item in os.getenv("REPLICA_URLS", "ws://localhost:8765").split(",")
 
 import asyncio
 import json
@@ -27,6 +23,8 @@ import asyncpg
 import httpx
 import numpy as np
 import websockets
+import uvicorn
+from fastapi import FastAPI
 from httpx_sse import aconnect_sse
 
 # ---------------------------------------------------------------------------
@@ -41,16 +39,24 @@ log = logging.getLogger("replica")
 # ---------------------------------------------------------------------------
 # Configuration (override via environment variables)
 # ---------------------------------------------------------------------------
-WS_HOST = os.getenv("WS_HOST", "0.0.0.0")
-WS_PORT = int(os.getenv("WS_PORT", "8765"))
+ALLOWED_HTTP_PORTS = {8000, 8002, 8004, 8006, 8008, 8010}
+
+BROKER_URLS = ["ws://localhost:9000/ws/ingest"]
+HTTP_HOST = "0.0.0.0"
+HTTP_PORT = int(os.getenv("HTTP_PORT", "8000"))
+
+if HTTP_PORT not in ALLOWED_HTTP_PORTS:
+    raise ValueError(
+        f"Unsupported HTTP_PORT '{HTTP_PORT}'. Use one of: {sorted(ALLOWED_HTTP_PORTS)}"
+    )
 
 DB_DSN = os.getenv(
     "DB_DSN",
     "postgresql://replica:replica@localhost:5432/seismic",
 )
 
-GATEWAY_URL = os.getenv("GATEWAY_URL", "http://localhost:9000/api/events")
-SIMULATOR_URL = os.getenv("SIMULATOR_URL", "http://localhost:8080")
+GATEWAY_URL = "http://localhost:8001/api/events"
+SIMULATOR_URL = "http://localhost:8080"
 
 # Sliding-window & analysis parameters
 WINDOW_SIZE = int(os.getenv("WINDOW_SIZE", "200"))
@@ -85,6 +91,22 @@ seen_sensors: set[str] = set()
 
 # Asyncio event — set when we need to shut down
 shutdown_event = asyncio.Event()
+http_server: uvicorn.Server | None = None
+resolved_http_port = HTTP_PORT
+resolved_replica_id = f"replica-{resolved_http_port}"
+
+health_app = FastAPI(title="Processing Replica Health")
+
+
+@health_app.get("/health")
+async def health() -> dict:
+    return {
+        "status": "ok",
+        "replica_id": resolved_replica_id,
+        "health_url": f"http://{HTTP_HOST}:{resolved_http_port}/health",
+        "broker_urls": BROKER_URLS,
+        "gateway_url": GATEWAY_URL,
+    }
 
 # ---------------------------------------------------------------------------
 # Database helpers
@@ -98,43 +120,11 @@ async def connect_db() -> None:
     log.info("Connected to database.")
 
 
-async def init_db() -> None:
-    """Create tables if they do not exist yet."""
-    global db_pool
-    db_pool = await asyncpg.create_pool(dsn=DB_DSN, min_size=2, max_size=10)
-    async with db_pool.acquire() as conn:
-        await conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS sensors (
-                sensor_id        TEXT PRIMARY KEY,
-                sensor_name      TEXT,
-                category         TEXT,
-                region           TEXT,
-                latitude         DOUBLE PRECISION,
-                longitude        DOUBLE PRECISION,
-                measurement_unit TEXT
-            );
-            """
-        )
-        await conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS events (
-                id                   BIGSERIAL PRIMARY KEY,
-                sensor_id            TEXT        NOT NULL,
-                event_type           TEXT        NOT NULL,
-                last_sample_timestamp TIMESTAMPTZ NOT NULL,
-                peak_frequency       DOUBLE PRECISION,
-                peak_amplitude       DOUBLE PRECISION,
-                duration             DOUBLE PRECISION,
-                UNIQUE (sensor_id, last_sample_timestamp)
-            );
-            """
-        )
-    log.info("Database tables ready.")
-
-
 async def upsert_sensor(payload: dict) -> None:
     """Insert static sensor metadata — once per unique sensor_id."""
+    if db_pool is None:
+        return
+
     sensor_id = payload["sensor_id"]
     if sensor_id in seen_sensors:
         return
@@ -166,6 +156,9 @@ async def upsert_sensor(payload: dict) -> None:
 
 async def persist_event(event: dict) -> None:
     """Save a detected event — idempotent via ON CONFLICT DO NOTHING."""
+    if db_pool is None:
+        return
+
     try:
         async with db_pool.acquire() as conn:
             await conn.execute(
@@ -281,7 +274,7 @@ async def process_message(raw: str) -> None:
         return
 
     # ---- Sensor metadata (static, persisted once) --------------------------
-    # asyncio.create_task(upsert_sensor(payload))
+    asyncio.create_task(upsert_sensor(payload))
 
     # ---- Update per-sensor sliding window & counters -----------------------
     sampling_rates[sensor_id] = sampling_rate
@@ -348,54 +341,58 @@ async def process_message(raw: str) -> None:
         peak_amp,
     )
 
-    # NO MORE win.clear()! The historical data stays in the buffer.
+    # The historical data stays in the buffer.
     # Trigger cooldown to prevent spamming the same event over and over.
     cooldown_counters[sensor_id] = COOLDOWN_SAMPLES
 
     # Persist + forward concurrently
     await asyncio.gather(
-        # persist_event(event),
-        # forward_to_gateway(event),
+        persist_event(event),
+        forward_to_gateway(event),
         return_exceptions=True,
     )
 
 
 # ---------------------------------------------------------------------------
-# WebSocket server
+# Broker WebSocket client
 # ---------------------------------------------------------------------------
 
 
-async def ws_handler(websocket) -> None:
-    """Handle one inbound WebSocket connection from the Broker."""
-    remote = websocket.remote_address
-    log.info("Broker connected from %s", remote)
-    try:
-        async for message in websocket:
+async def consume_broker_stream() -> None:
+    """
+    Connect to the broker as a WebSocket client and keep retrying until shutdown.
+    Consumes the broker stream until shutdown.
+    """
+    if not BROKER_URLS:
+        raise RuntimeError("No broker URL configured. Set BROKER_URL or BROKER_URLS.")
+
+    while not shutdown_event.is_set():
+        for broker_url in BROKER_URLS:
             if shutdown_event.is_set():
-                break
-            await process_message(message)
-    except websockets.ConnectionClosedError as exc:
-        log.warning("Broker connection closed unexpectedly: %s", exc)
-    finally:
-        log.info("Broker disconnected from %s", remote)
+                return
 
+            try:
+                log.info("Connecting to broker at %s", broker_url)
+                async with websockets.connect(
+                    broker_url,
+                    ping_interval=20,
+                    ping_timeout=10,
+                ) as websocket:
+                    log.info("Connected to broker at %s", broker_url)
 
-async def run_ws_server() -> None:
-    """Start the WebSocket ingest server and keep it running until shutdown."""
-    server = await websockets.serve(
-        ws_handler,
-        WS_HOST,
-        WS_PORT,
-        ping_interval=20,
-        ping_timeout=10,
-    )
-    log.info(
-        "WebSocket ingest server listening on ws://%s:%d/ws/ingest", WS_HOST, WS_PORT
-    )
-    await shutdown_event.wait()
-    server.close()
-    await server.wait_closed()
-    log.info("WebSocket server stopped.")
+                    async for message in websocket:
+                        if shutdown_event.is_set():
+                            return
+                        await process_message(message)
+            except asyncio.CancelledError:
+                raise
+            except websockets.ConnectionClosedError as exc:
+                log.warning("Broker stream closed from %s: %s", broker_url, exc)
+            except OSError as exc:
+                log.warning("Broker connection failed for %s: %s", broker_url, exc)
+            except Exception as exc:
+                log.error("Unexpected broker client error for %s: %s", broker_url, exc)
+        await asyncio.sleep(1)
 
 
 # ---------------------------------------------------------------------------
@@ -431,12 +428,54 @@ async def listen_control_stream() -> None:
                             )
                             shutdown_event.set()
                             return
+        except asyncio.CancelledError:
+            raise
+        except (httpx.ReadError, httpx.RemoteProtocolError, httpx.ReadTimeout) as exc:
+            if shutdown_event.is_set():
+                return
+            # Quietly retry common SSE disconnects; they are expected in practice.
+            pass
         except Exception as exc:
             if shutdown_event.is_set():
                 return
-            log.error("SSE control stream error: %s — retrying in %.1fs", exc, backoff)
-            await asyncio.sleep(backoff)
-            backoff = min(backoff * 2, 30.0)
+            error_name = exc.__class__.__name__
+            error_detail = str(exc).strip() or "no details"
+            log.error(
+                "SSE control stream error (%s: %s) — retrying in %.1fs",
+                error_name,
+                error_detail,
+                backoff,
+            )
+        await asyncio.sleep(backoff)
+        backoff = min(backoff * 2, 30.0)
+
+
+# ---------------------------------------------------------------------------
+# Replica health server
+# ---------------------------------------------------------------------------
+
+
+async def run_health_server() -> None:
+    global http_server
+    global resolved_http_port
+    global resolved_replica_id
+
+    resolved_http_port = HTTP_PORT
+    resolved_replica_id = f"replica-{resolved_http_port}"
+
+    config = uvicorn.Config(
+        health_app,
+        host=HTTP_HOST,
+        port=resolved_http_port,
+        log_level="warning",
+    )
+    http_server = uvicorn.Server(config)
+    log.info(
+        "Replica health server listening on http://%s:%d/health",
+        HTTP_HOST,
+        resolved_http_port,
+    )
+    await http_server.serve()
 
 
 # ---------------------------------------------------------------------------
@@ -456,6 +495,9 @@ async def graceful_shutdown() -> None:
     if http_client:
         await http_client.aclose()
         log.info("HTTP client closed.")
+
+    if http_server is not None:
+        http_server.should_exit = True
 
     log.info("Replica shut down cleanly.")
 
@@ -495,13 +537,24 @@ async def main() -> None:
 
     # Initialise shared resources
     http_client = httpx.AsyncClient()
-    # await init_db()
-    # await connect_db()
+    log.info(
+        "Replica starting with health=http://%s:%d/health broker=%s gateway=%s",
+        HTTP_HOST,
+        HTTP_PORT,
+        BROKER_URLS[0],
+        GATEWAY_URL,
+    )
+    try:
+        await connect_db()
+    except Exception as exc:
+        db_pool = None
+        log.warning("Database unavailable, continuing without persistence: %s", exc)
 
     # Launch all background tasks
     await asyncio.gather(
-        run_ws_server(),
-        # listen_control_stream(),
+        run_health_server(),
+        consume_broker_stream(),
+        listen_control_stream(),
         graceful_shutdown(),
     )
 
