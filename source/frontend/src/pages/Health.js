@@ -9,7 +9,10 @@ export default function Health() {
   const replicaStateRef = useRef({});
   const [summary, setSummary] = useState(null);
   const [replicaRows, setReplicaRows] = useState([]);
-  const [healthEvents, setHealthEvents] = useState([]);
+  const [healthEvents, setHealthEvents] = useState(() => {
+    const saved = sessionStorage.getItem("healthEvents");
+    return saved ? JSON.parse(saved) : [];
+  });
 
   useEffect(() => {
     const fetchHealth = async () => {
@@ -74,7 +77,13 @@ export default function Health() {
         setReplicaRows(nextRows);
 
         if (nextEvents.length) {
-          setHealthEvents((current) => [...nextEvents, ...current].slice(0, 6));
+          setHealthEvents((current) => {
+            // Unisce i nuovi eventi ai vecchi e tiene gli ultimi 6
+            const updatedEvents = [...nextEvents, ...current].slice(0, 6);
+            // Salva istantaneamente nel browser per sopravvivere al cambio pagina
+            sessionStorage.setItem("healthEvents", JSON.stringify(updatedEvents));
+            return updatedEvents;
+          });
         }
       } catch (error) {
         console.error(error);
@@ -106,7 +115,6 @@ export default function Health() {
       <header className="page-header page-header--split">
         <div>
           <h1 className="page-title">System Health</h1>
-          <p className="page-subtitle">Processing replica availability.</p>
         </div>
 
         <span className="pill">ADMIN</span>
@@ -133,7 +141,12 @@ export default function Health() {
 
           <div className="summary-card">
             <div className="summary-card__label">Live Data</div>
-            <div className="summary-card__value">{liveData}</div>
+            <div 
+              className="summary-card__value" 
+              style={{ color: liveData === "Active" ? "#00e676" : "#ff4444" }}
+            >
+              {liveData}
+            </div>
           </div>
         </div>
       </section>

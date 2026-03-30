@@ -40,7 +40,13 @@ export default function History() {
       try {
         const response = await fetch(`${API_BASE}/sensors`);
         const payload = await response.json();
-        setSensors(payload.data || []);
+        
+        // Sort the sensors array alphanumerically by sensor_id in ascending order
+        const sortedSensors = (payload.data || []).sort((a, b) => {
+          return a.sensor_id.localeCompare(b.sensor_id);
+        });
+        
+        setSensors(sortedSensors);
       } catch (error) {
         console.error(error);
       }

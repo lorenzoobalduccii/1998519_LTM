@@ -1,11 +1,12 @@
 import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { API_BASE } from "../config";
+import { API_BASE, LIVE_WS_URL } from "../config";
 import {
   categoryLabel,
   formatCoordinates,
   formatFrequency,
   sensorDisplayId,
+  eventTypeBadge,
 } from "../utils/platform";
 
 const categoryRank = {
@@ -50,6 +51,23 @@ export default function Sensors() {
     };
 
     loadDashboard();
+  }, []);
+
+  // Initialize WebSocket connection to update latest events in real-time
+  useEffect(() => {
+    const socket = new WebSocket(LIVE_WS_URL);
+
+    socket.onmessage = (message) => {
+      const incomingEvent = JSON.parse(message.data);
+
+      setLatestEvents((currentLatest) => ({
+        ...currentLatest,
+        [incomingEvent.sensor_id]: incomingEvent,
+      }));
+    };
+
+    // Clean up the socket connection on component unmount
+    return () => socket.close();
   }, []);
 
   const orderedSensors = [...sensors].sort((left, right) => {
@@ -100,7 +118,12 @@ export default function Sensors() {
 
           <div className="summary-card summary-card--accent">
             <div className="summary-card__label">Live Monitoring</div>
-            <div className="summary-card__value">{liveMonitoring}</div>
+            <div 
+              className="summary-card__value" 
+              style={{ color: liveMonitoring === "Active" ? "#00e676" : "#ff4444" }}
+            >
+              {liveMonitoring}
+            </div>
           </div>
         </div>
       </section>
@@ -137,7 +160,7 @@ export default function Sensors() {
                   <div className="data-list__item">
                     <span className="data-list__label">Last Event</span>
                     <span className="data-list__value data-list__value--muted">
-                      {latestEvent ? latestEvent.event_id : "No recent event"}
+                      {latestEvent ? eventTypeBadge(latestEvent.event_type) : "No recent event"}
                     </span>
                   </div>
 

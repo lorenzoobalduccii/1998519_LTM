@@ -164,10 +164,6 @@ select {
   justify-content: center;
 }
 
-.summary-card--accent {
-  background: var(--accent);
-}
-
 .summary-card--accent .summary-card__label,
 .summary-card--accent .summary-card__value {
   color: var(--text-primary);
