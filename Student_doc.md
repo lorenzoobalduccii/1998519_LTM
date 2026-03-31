@@ -163,10 +163,10 @@ The service consumes the broker stream continuously, stores a fixed-size window 
 ## CONTAINER_NAME: Gateway
 
 ### DESCRIPTION:
-Single entry point for the frontend. Exposes historical APIs, event details, cluster status, and the live WebSocket feed.
+Single entry point for the frontend and internal ingestion point for replica submissions. Exposes historical APIs, event details, cluster status, and the live WebSocket feed.
 
 ### USER STORIES:
-Aggregates dashboard APIs and live feeds for user stories: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 19, 20. Enforces consolidated live event delivery for user story: 17.
+Aggregates dashboard APIs and live feeds for user stories: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 19, 20. Enforces consolidated live and persisted event delivery for user story: 17.
 
 ### PORTS:
 8001:8001

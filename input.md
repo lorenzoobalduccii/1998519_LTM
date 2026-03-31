@@ -62,6 +62,8 @@ The system uses two internal message structures:
 - a normalized measurement envelope broadcast by the broker to all processing replicas
 - a detected event envelope emitted by the replicas toward the gateway, then deduplicated and persisted by the gateway with the unchanged SQL schema
 
+The measurement metadata is also forwarded by each replica to the gateway sensor-ingestion API once per sensor, so that the gateway can populate the `sensors` table even before a seismic event is detected.
+
 ## Measurement Envelope
 
 ```json
