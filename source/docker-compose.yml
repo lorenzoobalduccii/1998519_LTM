@@ -1,6 +1,6 @@
 services:
   simulator:
-    image: seismic-signal-simulator:multiarch_v1
+    image: mattia9203/seismic-signal-simulator:multiarch_v1
     container_name: seismic-simulator
     environment:
       SAMPLING_RATE_HZ: "20"
