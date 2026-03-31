@@ -50,7 +50,9 @@ The deployed topology is defined in `source/docker-compose.yml`.
 Provided seismic signal simulator used as the external source of sensors, live measurements, and shutdown commands.
 
 ### USER STORIES:
-Provides sensor discovery data for user stories: 1, 2, 3. Provides live sample streams that feed user stories: 5, 6, 8, 9. Provides shutdown control input that stresses user stories: 16, 18, 19, 20.
+Provides sensor discovery data for user stories: 1, 2, 3. 
+Provides live sample streams that feed user stories: 5, 6, 8, 9. 
+Provides shutdown control input that stresses user stories: 16, 18, 19, 20.
 
 ### PORTS:
 8080:8080
@@ -124,7 +126,8 @@ The service starts a WebSocket server for replicas, waits until the expected num
 Set of five identical processing containers that perform sliding-window analysis, FFT-based classification, persistence, and alert forwarding.
 
 ### USER STORIES:
-Performs detection, classification, persistence, and gateway forwarding for user stories: 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 17. Exposes replica health and reacts to shutdown commands for user stories: 16, 18, 19, 20.
+Performs detection, classification, persistence, and gateway forwarding for user stories: 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 17. 
+Exposes replica health and reacts to shutdown commands for user stories: 16, 18, 19, 20.
 
 ### PORTS:
 Each replica exposes `/health` on port `8000`. In the Docker Compose deployment this port is used only inside the Docker network, so the replicas are reached by service name and no host port is published.
@@ -166,7 +169,8 @@ The service consumes the broker stream continuously, stores a fixed-size window 
 Single entry point for the frontend. Exposes historical APIs, event details, cluster status, and the live WebSocket feed.
 
 ### USER STORIES:
-Aggregates dashboard APIs and live feeds for user stories: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 19, 20. Enforces consolidated live event delivery for user story: 17.
+Aggregates dashboard APIs and live feeds for user stories: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 19, 20. 
+Enforces consolidated live event delivery for user story: 17.
 
 ### PORTS:
 8001:8001
@@ -208,7 +212,8 @@ The service exposes REST APIs for historical queries and event details, a live W
 Persistent storage used for sensor metadata and detected events.
 
 ### USER STORIES:
-Persists sensor metadata and event history for user stories: 1, 2, 3, 7, 8, 9, 10, 11, 12, 13, 14, 15. Enforces unique event storage together with replica-side idempotency for user story: 17.
+Persists sensor metadata and event history for user stories: 1, 2, 3, 7, 8, 9, 10, 11, 12, 13, 14, 15. 
+Enforces unique event storage together with replica-side idempotency for user story: 17.
 
 ### PORTS:
 5432:5432
@@ -244,7 +249,8 @@ Standard PostgreSQL 16 Alpine image.
 React-based dashboard used by operators and administrators to monitor the system, inspect events, and view replica health.
 
 ### USER STORIES:
-Implements operator-facing dashboard views for user stories: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15. Implements administrator monitoring views for user stories: 16, 17, 18, 19, 20.
+Implements operator-facing dashboard views for user stories: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15. 
+Implements administrator monitoring views for user stories: 16, 17, 18, 19, 20.
 
 ### PORTS:
 3000:80
